@@ -16,33 +16,59 @@ from bs4 import BeautifulSoup
 
 SITES = [
     # TODO: the two Inno Wing sites you were given
+    "https://innowings.engg.hku.hk/",
+    "https://innoacademy.engg.hku.hk/",
 ]
 
 
-def crawl(start_url: str, max_pages: int = 500) -> list[str]:
-    """Return every page URL on the same site as start_url."""
-    seen, queue, out = set(), [start_url], []
+def crawl(start_url: str, max_pages: int = 500) -> list[dict]:
+    """Download and extract pages from the same site as start_url."""
+    seen, queue, pages = set(), [start_url], []
     domain = urlparse(start_url).netloc
 
-    while queue and len(out) < max_pages:
+    blocked_extensions = ( #added by student to avoid downloading non-html files
+        ".pdf", ".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg",
+        ".zip", ".doc", ".docx", ".ppt", ".pptx",
+    )
+
+    while queue and len(pages) < max_pages:
         url = queue.pop(0)
         if url in seen:
             continue
         seen.add(url)
+
         try:
-            html = requests.get(url, timeout=20).text
-        except Exception:
+            response = requests.get(url, timeout=20)
+            #------------------
+            response.raise_for_status()
+            if "text/html" not in response.headers.get("content-type", ""):
+                continue
+            #------------------
+            html = response.text
+            pages.append(extract(html, url))
+        except Exception as exc:
+            print("skipped", url, exc)
             continue
-        out.append(url)
 
-        # TODO find the links on this page and add the internal ones to
-        # TODO queue, something like:
-        # for a in BeautifulSoup(html, "html.parser").select("a[href]"):
-        #     link = urljoin(url, a["href"]).split("#")[0]
-        #     if urlparse(link).netloc == domain and link not in seen:
-        #         queue.append(link)
+        if len(pages) == 1 or len(pages) % 10 == 0:
+            print(f"[{domain}] {len(pages)} pages collected")
 
-    return out
+        for a in BeautifulSoup(html, "html.parser").select("a[href]"):
+            parsed = urlparse(urljoin(url, a["href"]))
+            link = parsed._replace(query="", fragment="").geturl()
+            path = parsed.path.lower()
+            if (
+                parsed.scheme in ("http", "https")
+                and parsed.netloc == domain
+                and link not in seen
+                and not path.endswith(blocked_extensions)
+                and "/wp-admin" not in path
+                and "/wp-login" not in path
+            ):
+                queue.append(link)
+
+    print(f"[{domain}] finished with {len(pages)} pages")
+    return pages
 
 
 def extract(html: str, url: str) -> dict:
@@ -56,9 +82,17 @@ def extract(html: str, url: str) -> dict:
     """
     soup = BeautifulSoup(html, "html.parser")
 
-    # TODO replace this with the element that holds the content, e.g.
-    # TODO soup.select_one("main") or soup.select_one("#content")
-    body = soup
+    for tag in soup.select("script, style, nav, header, footer, noscript"):
+        tag.decompose()
+
+    body = (
+        soup.select_one("main")
+        or soup.select_one("article")
+        or soup.select_one("#content")
+        or soup.select_one(".site-content")
+        or soup.body
+        or soup
+    )
 
     images = []
     for img in soup.select("img"):
@@ -85,16 +119,12 @@ def extract(html: str, url: str) -> dict:
 if __name__ == "__main__":
     pages = []
     for site in SITES:
-        for url in crawl(site):
-            try:
-                pages.append(extract(requests.get(url, timeout=20).text, url))
-            except Exception as exc:
-                print("skipped", url, exc)
+        pages.extend(crawl(site))
 
     Path("data").mkdir(exist_ok=True)
-    Path("data/pages.json").write_text(json.dumps(pages, indent=1))
+    Path("data/pages.json").write_text(json.dumps(pages, indent=1), encoding="utf-8")
 
     images = [im for p in pages for im in p["images"]]
-    Path("data/images.json").write_text(json.dumps(images, indent=1))
+    Path("data/images.json").write_text(json.dumps(images, indent=1), encoding="utf-8")
 
     print(f"{len(pages)} pages, {len(images)} images")
